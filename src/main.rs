@@ -9,6 +9,15 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    // Tests
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards!")
+        .as_millis();
+
+    // Initialize the blockchain
+    let mut blockchain = Blockchain::new();
+
     // Alice keys
     let alice_signing_key = SigningKey::random(&mut OsRng);
     let alice_verifying_key = VerifyingKey::from(&alice_signing_key);
@@ -41,9 +50,96 @@ fn main() {
     let mut t_5 = Transaction::new(bob_verifying_key, alice_verifying_key, 2);
     t_5.sign(&bob_signing_key);
 
-    // Blocks
-    let b_0 = Block::new(0, Vec::from([t_0, t_1, t_2, t_3]), [0; 32]);
-    let b_1 = Block::new(b_0.index+1, Vec::from([t_4, t_5]), b_0._hash().unwrap());
+    // Add valid blocks
+    let b_1 = Block::new(
+        blockchain.chain.last().unwrap().index + 1,
+        Vec::from([t_0, t_1, t_2, t_3]),
+        blockchain.chain.last().unwrap().hash.unwrap(),
+    );
+    println!("Adding b_1: {:?}", blockchain.add_block(b_1));
+    let b_2 = Block::new(
+        blockchain.chain.last().unwrap().index + 1,
+        Vec::from([t_4, t_5]),
+        blockchain.chain.last().unwrap().hash.unwrap(),
+    );
+    println!("Adding b_2: {:?}", blockchain.add_block(b_2));
+
+    // Add invalid blocks
+    // Index error
+    let b_3 = Block::new(
+        12,
+        Vec::from([]),
+        blockchain.chain.last().unwrap().hash.unwrap(),
+    );
+    println!("Adding b_3: {:?}", blockchain.add_block(b_3));
+    // Transaction error
+    let mut t_6 = Transaction::new(bob_verifying_key, alice_verifying_key, 8462);
+    t_6.sign(&alice_signing_key);
+    let b_4 = Block::new(
+        blockchain.chain.last().unwrap().index + 1,
+        Vec::from([t_6]),
+        blockchain.chain.last().unwrap().hash.unwrap(),
+    );
+    println!("Adding b_4: {:?}", blockchain.add_block(b_4));
+    // Hashes link mismatch
+    let b_5 = Block::new(
+        blockchain.chain.last().unwrap().index + 1,
+        Vec::from([]),
+        blockchain.chain.first().unwrap().hash.unwrap(),
+    );
+    println!("Adding b_5: {:?}", blockchain.add_block(b_5));
+    // Time goes backwards
+    let mut b_6 = Block::new(
+        blockchain.chain.last().unwrap().index + 1,
+        Vec::from([]),
+        blockchain.chain.last().unwrap().hash.unwrap(),
+    );
+    b_6.timestamp = timestamp;
+    println!("Adding b_6: {:?}", blockchain.add_block(b_6));
+    // Hash has been manipulated
+    let mut b_7 = Block::new(
+        blockchain.chain.last().unwrap().index + 1,
+        Vec::from([]),
+        blockchain.chain.last().unwrap().hash.unwrap(),
+    );
+    b_7.hash = Some([0u8; 32]);
+    println!("Adding b_7: {:?}", blockchain.add_block(b_7));
+}
+
+struct Blockchain {
+    chain: Vec<Block>,
+}
+
+impl Blockchain {
+    fn new() -> Blockchain {
+        let genesis = Block::new(0, Vec::new(), [0u8; 32]);
+        Blockchain {
+            chain: Vec::from([genesis]),
+        }
+    }
+
+    fn add_block(&mut self, new_block: Block) -> Result<(), String> {
+        // Get last block (the chain is never empty, as genesis is initialized at creation)
+        let last_block = self.chain.last().unwrap();
+
+        // Verify conformity
+        let transactions_conformity = new_block.verify_transactions();
+        if new_block.index != last_block.index + 1 {
+            return Err("Block verification failed: indexes mismatch.".to_string());
+        } else if new_block.timestamp <= last_block.timestamp {
+            return Err("Block verification failed: time goes backwards.".to_string());
+        } else if new_block.previous_hash != last_block.hash.unwrap() {
+            return Err("Block verification failed: hashes link mismatch.".to_string());
+        } else if new_block.hash.unwrap() != new_block._hash().unwrap() {
+            return Err("Block verification failed: hash error.".to_string());
+        } else if transactions_conformity.is_err() {
+            return transactions_conformity;
+        } else {
+            println!("Block {} added succesfully!", new_block.index);
+            self.chain.push(new_block);
+            Ok(())
+        }
+    }
 }
 
 struct Block {
@@ -72,6 +168,15 @@ impl Block {
 
         block.hash = block._hash();
         block
+    }
+
+    fn verify_transactions(&self) -> Result<(), String> {
+        for transaction in self.transactions.iter() {
+            if !transaction.verify() {
+                return Err("Block verification failed: error in transactions.".to_string());
+            }
+        }
+        Ok(())
     }
 
     fn _hash(&self) -> Option<[u8; 32]> {
