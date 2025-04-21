@@ -5,6 +5,12 @@ use k256::ecdsa::{
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Debug)]
+pub enum Message {
+    NewTransaction(Transaction),
+    NewBlock(Block),
+}
+
 pub struct Blockchain {
     pub chain: Vec<Block>,
 }
@@ -41,6 +47,7 @@ impl Blockchain {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Block {
     pub index: u64,
     pub transactions: Vec<Transaction>,
@@ -91,7 +98,7 @@ impl Block {
 
         bytes.extend_from_slice(&self.index.to_be_bytes());
         for transaction in &self.transactions {
-            bytes.extend_from_slice(&transaction._hash());
+            bytes.extend_from_slice(&transaction.hash());
         }
         bytes.extend_from_slice(&self.previous_hash);
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
@@ -101,6 +108,7 @@ impl Block {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Transaction {
     sender: VerifyingKey,
     receiver: VerifyingKey,
@@ -127,7 +135,7 @@ impl Transaction {
     pub fn verify(&self) -> bool {
         match &self.signature {
             Some(signature) => {
-                let hash = self._hash();
+                let hash = self.hash();
                 self.sender.verify(&hash, signature).is_ok()
             }
             None => false,
@@ -137,12 +145,12 @@ impl Transaction {
     pub fn sign(&mut self, signing_key: &SigningKey) {
         // Verify if the signing_key is owned by sender
         if VerifyingKey::from(signing_key) == self.sender {
-            let hash = self._hash();
+            let hash = self.hash();
             self.signature = Some(signing_key.sign(&hash));
         }
     }
 
-    fn _hash(&self) -> [u8; 32] {
+    pub fn hash(&self) -> [u8; 32] {
         let transaction_bytes = self._to_bytes();
         let mut hasher = Sha256::new();
         hasher.update(&transaction_bytes);
