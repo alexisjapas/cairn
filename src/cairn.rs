@@ -1,9 +1,18 @@
-use k256::ecdsa::{
-    Signature, SigningKey, VerifyingKey,
-    signature::{Signer, Verifier},
+use k256::{
+    ecdsa::{
+        Signature, SigningKey, VerifyingKey,
+        signature::{Signer, Verifier},
+    },
+    elliptic_curve::rand_core::OsRng,
+    schnorr::SigningKey,
 };
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::mpsc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -11,13 +20,112 @@ pub enum Message {
     NewBlock(Block),
 }
 
+pub struct Node {
+    pub id: String,
+    pub blockchain: Blockchain,
+    pub tx: mpsc::Sender<Message>,
+    pub tx_pool: HashMap<[u8; 32], Transaction>,
+    signing_key: SigningKey,         // extract it to a Wallet struct later
+    pub verifying_key: VerifyingKey, // extract it to a Wallet struct later
+}
+
+impl Node {
+    pub fn new(id: String, genesis: Block, tx: mpsc::Sender<Message>) -> Node {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = VerifyingKey::from(&signing_key);
+        Node {
+            id,
+            blockchain: Blockchain::new(genesis.clone()),
+            tx,
+            tx_pool: HashMap::new(),
+            signing_key,
+            verifying_key,
+        }
+    }
+
+    pub fn create_and_broadcast_transaction(
+        &self,
+        receiver_key: VerifyingKey,
+        amount: u64,
+    ) -> Result<(), mpsc::SendError<Message>> {
+        let mut transaction = Transaction::new(self.verifying_key, receiver_key, amount);
+        transaction.sign(&self.signing_key);
+        self.tx.send(Message::NewTransaction(transaction.clone()))
+    }
+
+    pub fn mine_and_broadcast_block(&self) -> Result<(), mpsc::SendError<Message>>  {
+        let new_block = Block::new(
+            self.blockchain.chain.last().unwrap().index + 1,
+            self.tx_pool.values().cloned().collect(),
+            self.blockchain.chain.last().unwrap().hash.unwrap(),
+        );
+        self.tx.send(Message::NewBlock(new_block.clone()))
+    }
+
+    pub fn process_messages(&mut self, rx: &mpsc::Receiver<Message>) {
+        loop {
+            match rx.try_recv() {
+                Ok(message) => {
+                    match message {
+                        Message::NewTransaction(transaction) => {
+                            if transaction.verify() {
+                                println!("Verified transaction:\n{}", transaction);
+                                let entry = self.tx_pool.entry(transaction.hash());
+                                match entry {
+                                    std::collections::hash_map::Entry::Vacant(e) => {
+                                        e.insert(transaction.clone());
+                                        println!("Transaction inserted.");
+                                    }
+                                    std::collections::hash_map::Entry::Occupied(_) => {
+                                        println!("Transaction already exists.");
+                                    }
+                                }
+                            } else {
+                                println!("Transaction verification failed: {}", transaction);
+                            }
+                        }
+                        Message::NewBlock(block) => {
+                            println!("Received new block: {}", block.index);
+                            match self.blockchain.add_block(block.clone()) {
+                                Ok(_) => {
+                                    // Remove common transactions (both in Alice pool & the block)
+                                    for transaction in block.transactions.iter() {
+                                        println!("{:?}", transaction.hash());
+                                        if let Some(value) =
+                                            self.tx_pool.remove(&transaction.hash())
+                                        {
+                                            println!(
+                                                "Remove transaction {:?} from Alice's pool",
+                                                value.hash()
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("[Alice]Error {} while adding block.", e)
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    break;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    println!("Channel disconnected");
+                    break;
+                }
+            }
+        }
+    }
+}
+
 pub struct Blockchain {
     pub chain: Vec<Block>,
 }
 
 impl Blockchain {
-    pub fn new() -> Blockchain {
-        let genesis = Block::new(0, Vec::new(), [0u8; 32]);
+    pub fn new(genesis: Block) -> Blockchain {
         Blockchain {
             chain: Vec::from([genesis]),
         }
@@ -108,6 +216,21 @@ impl Block {
     }
 }
 
+impl fmt::Display for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let max_lenght = 6;
+        write!(
+            f,
+            "Block[{}]: Hash[{}], Prev[{}], {} txs, Nonce[{}]",
+            self.index,
+            format_bytes(&self.hash.unwrap_or_default(), max_lenght),
+            format_bytes(&self.previous_hash, max_lenght),
+            self.transactions.len(),
+            self.nonce
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Transaction {
     sender: VerifyingKey,
@@ -165,5 +288,32 @@ impl Transaction {
         bytes.extend_from_slice(&self.amount.to_be_bytes());
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
         bytes
+    }
+}
+
+impl fmt::Display for Transaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let max_lenght = 6;
+        write!(
+            f,
+            "Tr[{}]: {} => {} (Amount: {})",
+            format_bytes(&self.hash(), max_lenght),
+            format_bytes(&self.sender.to_sec1_bytes(), max_lenght),
+            format_bytes(&self.receiver.to_sec1_bytes(), max_lenght),
+            self.amount
+        )
+    }
+}
+
+fn format_bytes(bytes: &[u8], max_lenght: usize) -> String {
+    let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    if hex_string.len() > max_lenght {
+        format!(
+            "{}...{}",
+            &hex_string[..max_lenght],
+            &hex_string[hex_string.len() - max_lenght..]
+        )
+    } else {
+        hex_string
     }
 }
